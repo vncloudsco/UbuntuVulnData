@@ -1,0 +1,69 @@
+version: 0.2
+env:
+  secrets-manager:
+    DOCKERHUB_USERNAME: "DOCKERHUB_CREDENTIALS:username"
+    DOCKERHUB_PASSWORD: "DOCKERHUB_CREDENTIALS:password"
+phases:
+  install:
+    runtime-versions:
+      python: 3.7
+    commands:
+      # First step: see if file in S3 with package name & version already exists
+      - echo Check S3 file with package name/version exists
+      # Get list of CodeBuild IDs with PROJECT_NAME
+      - codebuild_ids=$(aws codebuild list-builds-for-project --project-name $PROJECT_NAME --sort-order DESCENDING)
+      # Send variables to python script (if S3 file exists with same package name/version, script will stop the build)
+      - python3 check-package-exists.py "$PACKAGE_NAME" "$S3_BUCKET" "$codebuild_ids" 
+  pre_build:
+    commands:
+      # Install docker compose cli
+      - echo Install docker compose CLI
+      - curl -L -o docker-linux-amd64.tar.gz https://github.com/docker/compose-cli/releases/download/v1.0.10/docker-linux-amd64.tar.gz
+      - tar xzf docker-linux-amd64.tar.gz
+      # Give permissions to docker folder
+      - chmod +x docker/docker
+      - ls -ltr
+      # Confirm compose cli has been installed
+      - docker/docker compose --help
+      - which docker
+      - ln -s $(which docker) /usr/local/bin/com.docker.cli
+      # Install pandas
+      - pip3 install pandas
+      # Install boto3
+      - pip3 install boto3
+      # Log into docker hub
+      - docker login --username ${DOCKERHUB_USERNAME} --password ${DOCKERHUB_PASSWORD}
+      # Log into Amazon ECR
+      - aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+      # Ensure repository is configured for scan on push
+      - aws ecr put-image-scanning-configuration --repository-name ${REPOSITORY} --image-scanning-configuration scanOnPush=true
+      
+  build:
+    commands:
+      # Show package name/version and tag
+      - echo Package name and version:${PACKAGE_NAME}
+      - echo Image tag:${TAG}
+      # Build image (passing in PACKAGE_NAME env variable)
+      - echo Build started
+      - docker build --build-arg PACKAGE_NAME="$PACKAGE_NAME" --tag ${TAG} .
+      # Tag docker image
+      - docker tag ${TAG}:latest ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPOSITORY}:${TAG}
+      # Show images in docker hub
+      - echo All docker hub images
+      - docker images
+      # Push image to ECR
+      - echo Pushing image to ECR
+      - docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPOSITORY}:${TAG}
+      # Sleep for 2 minutes (waiting for scan findings to populate)
+      - sleep 120
+      # Pull image from Amazon ECR
+      - echo Pulling image from amazon ECR
+      - results=$(aws ecr describe-image-scan-findings --repository-name ${REPOSITORY} --image-id imageTag=${TAG})
+      - echo $results
+      # Send results to python file for parsing
+      - echo Passing in scan results to python script for parsing
+      - python3 parse-scan-findings.py "$results" "$PACKAGE_NAME" "$S3_BUCKET"
+  
+  post_build:
+    commands:
+      - echo Build successful

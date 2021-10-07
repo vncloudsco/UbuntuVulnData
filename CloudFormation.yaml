@@ -1,0 +1,371 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template will launch the CodeBuild project for the Ubuntu Vuln Data Intern project.
+Transform: Count
+
+Parameters:
+  PackageName:
+    # Insert package name & version (with format 'package_name=package_version') into default section (must be followed by ", \")
+    Type: String
+    Description: Package name and version
+    Default: "DO_NOT_REMOVE, \
+    bash=4.3-14ubuntu1.4"
+  
+  Tags:
+    # Insert package tag into the below default section (must be followed by ", \")
+    # Do not insert = or ~ into the tag as it will not be accepted
+    # Package tag must match placement (i.e. indice) of package_name=package_version above
+    Type: String
+    Description: Package tag
+    Default: "DO_NOT_REMOVE, \
+    bash"
+  
+  AWSAccountID:
+    Type: String
+    Default: "324479277623"
+
+  AWSRegion:
+    Type: String
+    Default: "us-west-2"
+
+  Repository:
+    Type: String
+    Default: "ubuntu-testing"
+
+  S3Bucket:
+    Type: String
+    Default: "cwijulia-csv-test-bucket"
+
+  
+Resources:
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - codebuild.amazonaws.com
+            Action: 
+              - 'sts:AssumeRole'
+      Policies:
+
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsPolicy
+                Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogGroup'
+                  - 'logs:FilterLogEvents'
+                  - 'logs:DeleteLogGroup'
+                Resource:
+                  - '*'
+              - Sid: S3GetObjectPolicy
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - '*'
+              - Sid: RDSAccess
+                Effect: Allow
+                Action:
+                - rds:*
+                - secretsmanager:*
+                - ec2:*
+                - ecs:*
+                - cloudformation:*
+                - servicediscovery:*
+                - application-autoscaling:*
+                - elasticloadbalancing:*
+                - route53:*
+                - elasticfilesystem:*
+                - iam:*
+                - efs:*
+                Resource:
+                  - '*'
+              - Sid: ConnectionsFullAccess
+                Effect: Allow
+                Action:
+                - codestar-connections:CreateConnection
+                - codestar-connections:DeleteConnection
+                - codestar-connections:UseConnection
+                - codestar-connections:GetConnection
+                - codestar-connections:ListConnections
+                - codestar-connections:TagResource
+                - codestar-connections:ListTagsForResource
+                - codestar-connections:UntagResource
+                Resource:
+                  - '*'
+              - Sid: SecretsManagerReadWrite
+                Effect: Allow
+                Action:
+                - secretsmanager:DescribeSecret
+                - secretsmanager:GetRandomPassword
+                - secretsmanager:GetResourcePolicy
+                - secretsmanager:GetSecretValue
+                - secretsmanager:ListSecretVersionIds
+                Resource:
+                  - '*'
+              - Sid: AmazonEC2ContainerRegistryFullAccess
+                Effect: Allow
+                Action:
+                - "ecr:*"
+                - "cloudtrail:LookupEvents"
+                Resource:
+                  - '*'
+              - Sid: AWSCodeArtifactReadOnlyAccess
+                Effect: Allow
+                Action: 
+                - codeartifact:GetAuthorizationToken
+                - codeartifact:GetRepositoryEndpoint
+                - codeartifact:ReadFromRepository
+                Resource:
+                - '*'
+              - Sid: AWSCodeArtifactGetServiceToken
+                Effect: Allow
+                Action:
+                - sts:GetServiceBearerToken
+                Resource: 
+                  - '*'
+                Condition: 
+                  StringEquals: 
+                    sts:AWSServiceName: codeartifact.amazonaws.com
+              - Sid: CodeBuildPolicies
+                Effect: Allow
+                Action:
+                - codebuild:ListBuildsForProject
+                - codebuild:StopBuild 
+                Resource:
+                  - '*'
+
+  CodeBuildSourceCredential:
+    Type: 'AWS::CodeBuild::SourceCredential'
+    Properties:
+      AuthType: PERSONAL_ACCESS_TOKEN
+      ServerType: GITHUB_ENTERPRISE
+      Token: '{{resolve:secretsmanager:github-token:SecretString:GITHUB_ACCESS_TOKEN}}'
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Count: 1 # Manually update when new packages are added/removed
+    Properties:
+      Name: !Sub ${AWS::StackName}-codebuild-project-%d
+      ServiceRole: !GetAtt 
+        - CodeBuildServiceRole
+        - Arn
+      Source:
+        Type: GITHUB_ENTERPRISE
+        Location: !Sub 'https://git.xarth.tv/security/UbuntuVulnData.git'
+        BuildSpec: buildspec.yaml
+        Auth:
+          Type: OAUTH
+          Resource: !Ref CodeBuildSourceCredential
+      Artifacts:
+        Type: NO_ARTIFACTS
+      VpcConfig:
+        VpcId: !Ref CodeBuildVPC 
+        Subnets: [!Ref PrivateSubnet2] 
+        SecurityGroupIds: [!Ref CodeBuildSecurityGroup]  
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: 'aws/codebuild/standard:2.0'
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: PACKAGE_NAME
+            Type: PLAINTEXT
+            Value: !Select ["%d", !Split [", ", !Ref PackageName]] 
+          - Name: TAG
+            Type: PLAINTEXT
+            Value: !Select ["%d", !Split [", ", !Ref Tags]] 
+          - Name: AWS_ACCOUNT_ID
+            Type: PLAINTEXT
+            Value: !Ref AWSAccountID
+          - Name: AWS_REGION
+            Type: PLAINTEXT
+            Value: !Ref AWSRegion
+          - Name: REPOSITORY
+            Type: PLAINTEXT
+            Value: !Ref Repository
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref S3Bucket
+          - Name: PROJECT_NAME
+            Type: PLAINTEXT
+            Value: !Sub ${AWS::StackName}-codebuild-project-%d
+
+  CodeBuildVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+        - Key: name
+          Value: codebuild-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref CodeBuildVPC
+    
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: CodeBuildVPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: us-west-2a
+      Tags:
+        - Key: name
+          Value: CodeBuild-PublicSubnet1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: CodeBuildVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-west-2b
+      Tags:
+        - Key: name
+          Value: CodeBuild-PublicSubnet2
+
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: CodeBuildVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: us-west-2a
+      Tags:
+        - Key: name
+          Value: CodeBuild-PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: CodeBuildVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: us-west-2b
+      Tags:
+        - Key: name
+          Value: CodeBuild-PrivateSubnet2
+
+  CodeBuildEIP:
+    Type: AWS::EC2::EIP
+    Properties: 
+      Domain: vpc
+      Tags: 
+        - Key: name
+          Value: CodeBuildEIP
+    DependsOn: InternetGatewayAttachment
+
+  CodeBuildNatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt CodeBuildEIP.AllocationId
+      ConnectivityType: public
+      SubnetId: !Ref PublicSubnet1
+      Tags: 
+        - Key: name
+          Value: CodeBuildNATGateway
+    
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      Tags: 
+        - Key: name
+          Value: Codebuild-PrivateRouteTable
+      VpcId: !Ref CodeBuildVPC
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      Tags: 
+        - Key: name
+          Value: Codebuild-PublicRouteTable
+      VpcId: !Ref CodeBuildVPC
+
+  InternetGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties: 
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties: 
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref CodeBuildNatGateway
+      RouteTableId: !Ref PrivateRouteTable
+      
+
+  PrivateRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+    
+  PublicRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+    
+  PublicRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Codebuild Internet Group
+      GroupDescription: 'CodeBuild SecurityGroup'
+      SecurityGroupIngress:
+        - CidrIp: 10.0.0.0/16
+          IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+        - CidrIp: 10.0.0.0/16
+          IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+      VpcId: !Ref CodeBuildVPC
+
+  CodeBuildEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: 'true'
+      SecurityGroupIds: [!Ref CodeBuildSecurityGroup]
+      ServiceName: 'com.amazonaws.vpce.us-west-2.vpce-svc-02d9c29bb653310a1'
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      VpcEndpointType: Interface
+      VpcId: !Ref CodeBuildVPC
